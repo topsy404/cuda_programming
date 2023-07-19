@@ -1,104 +1,121 @@
-// This program computes the sum of two vectors of length N using pinned memory
+// This program computes the sum of two vectors of length N
 // By: Nick from CoffeeBeforeArch
+// revised by Topsy
 
 #include <algorithm>
 #include <cassert>
-#include <cstdlib>
 #include <iostream>
-#include <iterator>
 #include <vector>
-
-using std::begin;
-using std::copy;
-using std::cout;
-using std::end;
-using std::generate;
-using std::vector;
 
 // CUDA kernel for vector addition
 // __global__ means this is called from the CPU, and runs on the GPU
-__global__ void vectorAdd(int* a, int* b, int* c, int N) {
-  // Calculate global thread ID
-  int tid = (blockIdx.x * blockDim.x) + threadIdx.x;
+/**
+ * @brief                  Vector add
+ *
+ * @param d_a                array a, __restroct is used to indicate that a is not aliased with any other pointers in the code, no other pointer point the same memeory of a
+ * @param d_b                array b
+ * @param d_c                result array
+ * @param N                the number of element
+ * @return __global__
+ */
+__global__ void vectorAdd(const int *__restrict d_a, const int *__restrict d_b,
+                          int *__restrict d_c, int N)
+{
+    // Calculate global thread ID
+    int tid = (blockIdx.x * blockDim.x) + threadIdx.x;
 
-  // Boundary check
-  if (tid < N) {
-    // Each thread adds a single element
-    c[tid] = a[tid] + b[tid];
-  }
+    // Boundary check
+    if (tid < N)
+        d_c[tid] = d_a[tid] + d_b[tid];
 }
 
 // Check vector add result
-void verify_result(int *a, int *b, int *c, int N) {
-  for (int i = 0; i < N; i++) {
-    assert(c[i] == a[i] + b[i]);
-  }
+void verify_result(std::vector<int> &a, std::vector<int> &b,
+                   std::vector<int> &c)
+{
+    for (int i = 0; i < a.size(); i++)
+    {
+        assert(c[i] == a[i] + b[i]);
+    }
+}
+// Check vector add result
+void verify_result(int *a, int *b, int *c, int N)
+{
+    for (int i = 0; i < N; i++)
+    {
+        assert(c[i] == a[i] + b[i]);
+    }
 }
 
-int main() {
-  // Array size of 2^16 (65536 elements)
-  constexpr int N = 1 << 26;
-  size_t bytes = sizeof(int) * N;
 
-  // Vectors for holding the host-side (CPU-side) data
-  int *h_a, *h_b, *h_c;
+int main()
+{
+    // Array size of 2^16 (65536 elements)
+    constexpr int N = 1 << 16;
+    constexpr size_t bytes = sizeof(int) * N;
 
-  // Allocate pinned memory
-  cudaMallocHost(&h_a, bytes);
-  cudaMallocHost(&h_b, bytes);
-  cudaMallocHost(&h_c, bytes);
+    // Vectors for holding the host-side (CPU-side) data
+    // pin memory: keep the data in RAM, prevent it from being paged out to disk by the OS.
+    int *pin_host_a, *pin_host_b, *pin_host_c;
+    cudaMallocHost(&pin_host_a, bytes);
+    cudaMallocHost(&pin_host_b, bytes);
+    cudaMallocHost(&pin_host_c, bytes);
 
-  // Initialize random numbers in each array
-  for(int i = 0; i < N; i++){
-    h_a[i] = rand() % 100;
-    h_b[i] = rand() % 100;
-  }
-  
-  // Allocate memory on the device
-  int *d_a, *d_b, *d_c;
-  cudaMalloc(&d_a, bytes);
-  cudaMalloc(&d_b, bytes);
-  cudaMalloc(&d_c, bytes);
 
-  // Copy data from the host to the device (CPU -> GPU)
-  cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice);
+    // Initialize random numbers in each array
+    for (int i = 0; i < N; i++)
+    {
+        pin_host_a[i] = rand() % 100;
+        pin_host_b[i] = rand() % 100;
+    }
 
-  // Threads per CTA (1024 threads per CTA)
-  int NUM_THREADS = 1 << 10;
+    // Allocate memory on the device
+    int *d_a, *d_b, *d_c;
+    cudaMalloc(&d_a, bytes);
+    cudaMalloc(&d_b, bytes);
+    cudaMalloc(&d_c, bytes);
 
-  // CTAs per Grid
-  // We need to launch at LEAST as many threads as we have elements
-  // This equation pads an extra CTA to the grid if N cannot evenly be divided
-  // by NUM_THREADS (e.g. N = 1025, NUM_THREADS = 1024)
-  int NUM_BLOCKS = (N + NUM_THREADS - 1) / NUM_THREADS;
+    // Copy data from the host to the device (CPU -> GPU)
+    cudaMemcpy(d_a, pin_host_a, bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, pin_host_b, bytes, cudaMemcpyHostToDevice);
 
-  // Launch the kernel on the GPU
-  // Kernel calls are asynchronous (the CPU program continues execution after
-  // call, but no necessarily before the kernel finishes)
-  vectorAdd<<<NUM_BLOCKS, NUM_THREADS>>>(d_a, d_b, d_c, N);
+    // Threads per CTA (1024)
+    // CTA stands for "Cooperative Thread Array."  -> block
+    int NUM_THREADS = 1 << 10;
 
-  // Copy sum vector from device to host
-  // cudaMemcpy is a synchronous operation, and waits for the prior kernel
-  // launch to complete (both go to the default stream in this case).
-  // Therefore, this cudaMemcpy acts as both a memcpy and synchronization
-  // barrier.
-  cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost);
+    // CTAs per Grid
+    // We need to launch at LEAST as many threads as we have elements
+    // This equation pads an extra CTA to the grid if N cannot evenly be divided
+    // by NUM_THREADS (e.g. N = 1025, NUM_THREADS = 1024)
+    int NUM_BLOCKS = (N + NUM_THREADS - 1) / NUM_THREADS;
 
-  // Check result for errors
-  verify_result(h_a, h_b, h_c, N);
+    // Launch the kernel on the GPU
+    // Kernel calls are asynchronous (the CPU program continues execution after
+    // call, but no necessarily before the kernel finishes)
+    // specify the number of threads per CTA (block) and the number of CTAs per grid.
+    vectorAdd<<<NUM_BLOCKS, NUM_THREADS>>>(d_a, d_b, d_c, N);
 
-  // Free pinned memory
-  cudaFreeHost(h_a);
-  cudaFreeHost(h_b);
-  cudaFreeHost(h_c);
+    // Copy sum vector from device to host
+    // cudaMemcpy is a synchronous operation, and waits for the prior kernel
+    // launch to complete (both go to the default stream in this case).
+    // Therefore, this cudaMemcpy acts as both a memcpy and synchronization
+    // barrier.
+    cudaMemcpy(pin_host_c, d_c, bytes, cudaMemcpyDeviceToHost);
 
-  // Free memory on device
-  cudaFree(d_a);
-  cudaFree(d_b);
-  cudaFree(d_c);
+    // Check result for errors
+    verify_result(pin_host_a, pin_host_b, pin_host_c, N);
 
-  cout << "COMPLETED SUCCESSFULLY\n";
+    // Free pinned memory
+    cudaFreeHost(pin_host_a);
+    cudaFreeHost(pin_host_b);
+    cudaFreeHost(pin_host_c);
 
-  return 0;
+    // Free memory on device
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_c);
+
+    std::cout << "COMPLETED SUCCESSFULLY\n";
+
+    return 0;
 }
